@@ -5,6 +5,7 @@ const DIGISAC_MATCHES = [
   "https://*.digisac.co/*",
   "https://*.digisac.chat/*",
   "https://*.digisac.io/*",
+  "https://*.digisac.biz/*",
 ];
 
 let captureQueue = Promise.resolve();
