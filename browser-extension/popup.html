@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Digisac para Exportador</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <h1>Digisac → Exportador</h1>
+      <p id="instructions">A captura só começa após clicar no botão abaixo. Ela observa apenas a aba Digisac atual.</p>
+      <p id="status" role="status" aria-live="polite"></p>
+      <button id="start" type="button">Capturar próxima requisição</button>
+      <button id="cancel" class="secondary hidden" type="button">Cancelar captura</button>
+      <small>Após ativar, faça uma ação na página que gere uma requisição à API. Se não houver uma nova requisição, recarregue a página Digisac.</small>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>
