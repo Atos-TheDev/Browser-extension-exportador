@@ -155,5 +155,5 @@ function isDigisacUrl(value) {
   return url.protocol === "https:"
     && !url.username
     && !url.password
-    && /\.(?:digisac\.me|digisac\.app|digisac\.co|digisac\.chat|digisac\.io)$/i.test(url.hostname);
+    && /\.(?:digisac\.me|digisac\.app|digisac\.co|digisac\.chat|digisac\.io|digisac\.biz)$/i.test(url.hostname);
 }
