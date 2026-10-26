@@ -157,3 +157,192 @@ function isDigisacUrl(value) {
     && !url.password
     && /\.(?:digisac\.me|digisac\.app|digisac\.co|digisac\.chat|digisac\.io|digisac\.biz)$/i.test(url.hostname);
 }
+const LAST_JOB_REFRESH_AT_KEY = "digisacAwxLastJobRefreshAt";
+const PENDING_OUTPUT_DOWNLOADS_KEY = "digisacAwxPendingOutputDownloads";
+const MIN_JOB_REFRESH_GAP_MS = 30 * 1000;
+const OUTPUT_DOWNLOAD_TTL_MS = 60 * 1000;
+const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
+const AWX_ORIGIN = "https://awx-public.ikatec.cloud";
+
+let reservationQueue = Promise.resolve();
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "AWX_EXPECT_OUTPUT_DOWNLOAD") {
+    registerExpectedOutputDownload(message, _sender)
+      .then(sendResponse)
+      .catch(() => sendResponse({ registered: false }));
+    return true;
+  }
+
+  if (message?.type !== "AWX_JOB_REFRESH_SLOT") return false;
+
+  const reservation = reservationQueue.then(reserveRefreshSlot);
+  reservationQueue = reservation.catch(() => undefined);
+  reservation.then(sendResponse).catch(() => sendResponse({ granted: false, retryAfterMs: 5000 }));
+  return true;
+});
+
+chrome.downloads.onCreated.addListener((downloadItem) => {
+  return captureExpectedOutputDownload(downloadItem).catch(() => undefined);
+});
+
+async function reserveRefreshSlot() {
+  const stored = await chrome.storage.local.get(LAST_JOB_REFRESH_AT_KEY);
+  const lastRefreshAt = Number(stored[LAST_JOB_REFRESH_AT_KEY]) || 0;
+  const now = Date.now();
+  const retryAfterMs = lastRefreshAt + MIN_JOB_REFRESH_GAP_MS - now;
+
+  if (retryAfterMs > 0) return { granted: false, retryAfterMs };
+
+  await chrome.storage.local.set({ [LAST_JOB_REFRESH_AT_KEY]: now });
+  return { granted: true };
+}
+
+async function registerExpectedOutputDownload(message, sender) {
+  const tabId = sender.tab?.id;
+  let senderOrigin = "";
+  try {
+    senderOrigin = new URL(sender.url || "").origin;
+  } catch {}
+
+  if (!Number.isInteger(tabId) || senderOrigin !== AWX_ORIGIN) return { registered: false };
+  if (typeof message.requestId !== "string" || message.requestId.length < 8 || message.requestId.length > 128) return { registered: false };
+  if (typeof message.jobId !== "string" || !/^\d+$/.test(message.jobId)) return { registered: false };
+
+  const stored = await chrome.storage.session.get(PENDING_OUTPUT_DOWNLOADS_KEY);
+  const pendingByRequest = stored[PENDING_OUTPUT_DOWNLOADS_KEY] || {};
+  const now = Date.now();
+  for (const [key, pending] of Object.entries(pendingByRequest)) {
+    if (!pending || now - Number(pending.requestedAt) > OUTPUT_DOWNLOAD_TTL_MS) delete pendingByRequest[key];
+  }
+  pendingByRequest[message.requestId] = {
+    requestId: message.requestId,
+    jobId: message.jobId,
+    tabId,
+    requestedAt: now,
+  };
+  await chrome.storage.session.set({ [PENDING_OUTPUT_DOWNLOADS_KEY]: pendingByRequest });
+  return { registered: true };
+}
+
+async function captureExpectedOutputDownload(downloadItem) {
+  const safeDownloadUrl = getAllowedAwxDownloadUrl(downloadItem?.url, downloadItem?.referrer)
+    || getAllowedAwxDownloadUrl(downloadItem?.finalUrl, downloadItem?.referrer);
+  if (!safeDownloadUrl) return;
+
+  const downloadedJobId = getDownloadedJobId(downloadItem, safeDownloadUrl);
+  if (!downloadedJobId) return;
+
+  const stored = await chrome.storage.session.get(PENDING_OUTPUT_DOWNLOADS_KEY);
+  const pendingByRequest = stored[PENDING_OUTPUT_DOWNLOADS_KEY] || {};
+  const now = Date.now();
+  let removedExpired = false;
+  const matches = [];
+  for (const [key, pending] of Object.entries(pendingByRequest)) {
+    if (!pending || now - Number(pending.requestedAt) > OUTPUT_DOWNLOAD_TTL_MS) {
+      delete pendingByRequest[key];
+      removedExpired = true;
+      continue;
+    }
+    if (pending.jobId === downloadedJobId && Number.isInteger(pending.tabId) && pending.tabId >= 0) {
+      matches.push([key, pending]);
+    }
+  }
+  if (!matches.length) {
+    if (removedExpired) await chrome.storage.session.set({ [PENDING_OUTPUT_DOWNLOADS_KEY]: pendingByRequest });
+    return;
+  }
+
+  // Job IDs are unique in AWX. If the same completed job was opened more than once,
+  // associate this download with the most recently armed tab.
+  matches.sort((left, right) => Number(right[1].requestedAt) - Number(left[1].requestedAt));
+  const [pendingKey, pending] = matches[0];
+  const tabId = pending.tabId;
+  delete pendingByRequest[pendingKey];
+  await chrome.storage.session.set({ [PENDING_OUTPUT_DOWNLOADS_KEY]: pendingByRequest });
+
+  let result = { ok: false, error: "AWX_OUTPUT_READ_FAILED" };
+  try {
+    const [injection] = await chrome.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      world: "MAIN",
+      func: readDownloadedText,
+      args: [safeDownloadUrl, MAX_OUTPUT_BYTES],
+    });
+    if (injection?.result?.ok && typeof injection.result.text === "string") {
+      result = { ok: true, output: injection.result.text };
+    } else if (injection?.result?.error === "AWX_OUTPUT_TOO_LARGE") {
+      result = { ok: false, error: "AWX_OUTPUT_TOO_LARGE" };
+    }
+  } catch {}
+
+  try {
+    await chrome.tabs.sendMessage(tabId, {
+      type: "AWX_OUTPUT_FILE_CAPTURED",
+      requestId: pending.requestId,
+      jobId: pending.jobId,
+      ok: result.ok,
+      output: result.output || "",
+      error: result.error || "",
+    });
+  } catch {}
+}
+
+function getAllowedAwxDownloadUrl(value, referrer) {
+  try {
+    const url = new URL(value);
+    const isAllowedProtocol = url.protocol === "https:" || url.protocol === "blob:";
+    if (!isAllowedProtocol || url.origin !== AWX_ORIGIN) return "";
+    if (referrer && new URL(referrer).origin !== AWX_ORIGIN) return "";
+    return url.href;
+  } catch {
+    return "";
+  }
+}
+
+function getDownloadedJobId(downloadItem, downloadUrl) {
+  try {
+    const urlJobId = new URL(downloadUrl).pathname.match(/\/jobs\/(\d+)\/(?:stdout|output)\/?$/i)?.[1] || "";
+    if (urlJobId) return urlJobId;
+  } catch {}
+
+  const filename = String(downloadItem?.filename || "").split(/[\\/]/).pop() || "";
+  return filename.match(/^job[_-](\d+)\.txt$/i)?.[1] || "";
+}
+
+async function readDownloadedText(downloadUrl, maxBytes) {
+  try {
+    const url = new URL(downloadUrl);
+    if ((url.protocol !== "https:" && url.protocol !== "blob:") || url.origin !== "https://awx-public.ikatec.cloud") {
+      return { ok: false, error: "AWX_OUTPUT_READ_FAILED" };
+    }
+    const response = await fetch(downloadUrl, { credentials: "include", cache: "no-store" });
+    if (!response.ok) return { ok: false, error: "AWX_OUTPUT_READ_FAILED" };
+    const declaredLength = Number(response.headers.get("content-length")) || 0;
+    if (declaredLength > maxBytes) return { ok: false, error: "AWX_OUTPUT_TOO_LARGE" };
+    if (!response.body?.getReader) {
+      const bytes = await response.arrayBuffer();
+      if (bytes.byteLength > maxBytes) return { ok: false, error: "AWX_OUTPUT_TOO_LARGE" };
+      return { ok: true, text: new TextDecoder("utf-8").decode(bytes) };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let text = "";
+    let receivedBytes = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxBytes) {
+        await reader.cancel();
+        return { ok: false, error: "AWX_OUTPUT_TOO_LARGE" };
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    text += decoder.decode();
+    return { ok: true, text };
+  } catch {
+    return { ok: false, error: "AWX_OUTPUT_READ_FAILED" };
+  }
+}

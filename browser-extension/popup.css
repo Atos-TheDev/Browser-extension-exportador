@@ -10,4 +10,5 @@ button { min-height: 40px; padding: 8px 12px; border: 0; border-radius: 6px; bac
 button:disabled { cursor: wait; opacity: .6; }
 button.secondary { border: 1px solid #dedee9; background: white; color: #414158; }
 small { color: #77788f; font-size: 11px; }
+hr { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid #e6e5ee; }
 .hidden { display: none; }

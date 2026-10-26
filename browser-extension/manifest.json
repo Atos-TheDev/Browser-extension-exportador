@@ -1,12 +1,14 @@
 {
   "manifest_version": 3,
   "name": "Digisac para Exportador",
-  "version": "1.0.0",
-  "description": "Envia ao Exportador a URL e o bearer token da próxima requisição Digisac, somente após acionamento manual.",
+  "version": "1.1.0",
+  "description": "Captura sessão Digisac sob demanda e acompanha jobs AWX iniciados pela ferramenta.",
   "permissions": [
     "storage",
     "tabs",
-    "webRequest"
+    "webRequest",
+    "downloads",
+    "scripting"
   ],
   "host_permissions": [
     "https://*.digisac.me/*",
@@ -15,7 +17,8 @@
     "https://*.digisac.chat/*",
     "https://*.digisac.io/*",
     "https://*.digisac.biz/*",
-    "https://exportador-digisac.atos-prado.workers.dev/*"
+    "https://exportador-digisac.atos-prado.workers.dev/*",
+    "https://awx-public.ikatec.cloud/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -33,6 +36,15 @@
         "content.js"
       ],
       "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://awx-public.ikatec.cloud/*"
+      ],
+      "js": [
+        "awx-autofill.js"
+      ],
+      "run_at": "document_idle"
     }
   ]
 }
