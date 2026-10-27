@@ -149,6 +149,7 @@ function runAutofill({ subdomain = "qa-suporte", sessionUrl = "https://qa-suport
     session,
     postedMessages,
     runtimeMessages,
+    opener,
     deliverOutputFile(message) {
       for (const listener of [...runtimeListeners]) listener(message, { id: "digisac-awx-test-extension" }, () => {});
     },
@@ -260,6 +261,17 @@ test("recognizes a job after the AWX page reloads in the same tab", () => {
   assert.match([...reloaded.elements.values()][0].textContent, /job iniciado no awx \(id 865\)/i);
 });
 
+test("clears the in-progress job tracking when its Exportador page closes", () => {
+  const state = runAutofill({ inputs: [makeInput()] });
+  assert.ok(state.session.has("digisac-awx-pending-job-v1"));
+
+  state.opener.closed = true;
+  state.runTimers();
+
+  assert.equal(state.session.has("digisac-awx-pending-job-v1"), false);
+  assert.equal(state.timers.size, 0);
+});
+
 test("imports an already completed job URL and starts its output download", () => {
   const query = new URLSearchParams({
     awx_probe_subdomain: "qa-suporte",
@@ -365,6 +377,9 @@ test("captures the downloaded TXT and sends its contents to the tool", async () 
 
   assert.equal(download.clicks, 1, "the extension clicks AWX to create the TXT download it will capture");
   assert.ok(state.runtimeMessages.some(({ type }) => type === "AWX_EXPECT_OUTPUT_DOWNLOAD"));
+  const registration = state.runtimeMessages.find(({ type }) => type === "AWX_EXPECT_OUTPUT_DOWNLOAD");
+  assert.equal(registration.templateId, "59");
+  assert.equal(registration.subdomain, "qa-suporte");
   assert.equal(state.postedMessages.length, 0, "the tool waits for the downloaded file content");
   state.deliverOutputFile({
     type: "AWX_OUTPUT_FILE_CAPTURED",
@@ -418,6 +433,9 @@ test("names job 88 output as a process queue result", async () => {
   await state.flushAsync();
   const outputMessage = state.postedMessages.find(({ message }) => message.type === "digisac-awx-webhook-output");
   assert.equal(outputMessage.message.filename, "awx-process-queue-qa-suporte-871.txt");
+  const registration = state.runtimeMessages.find(({ type }) => type === "AWX_EXPECT_OUTPUT_DOWNLOAD");
+  assert.equal(registration.templateId, "88");
+  assert.equal(registration.subdomain, "qa-suporte");
   assert.equal(download.clicks, 1);
 });
 

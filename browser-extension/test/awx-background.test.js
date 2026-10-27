@@ -8,6 +8,7 @@ const script = await readFile(new URL("../background.js", import.meta.url), "utf
 function loadBackground() {
   let listener;
   let downloadListener;
+  let filenameListener;
   const storage = new Map();
   const sessionStorage = new Map();
   const sentToTabs = [];
@@ -43,6 +44,7 @@ function loadBackground() {
       },
       downloads: {
         onCreated: { addListener(callback) { downloadListener = callback; } },
+        onDeterminingFilename: { addListener(callback) { filenameListener = callback; } },
       },
       scripting: {
         async executeScript(injection) {
@@ -65,9 +67,9 @@ function loadBackground() {
     });
   }
 
-  function expectOutputDownload({ tabId = 41, requestId = "request-output-123", jobId = "123", senderUrl = "https://awx-public.ikatec.cloud/#/jobs/playbook/123/output" } = {}) {
+  function expectOutputDownload({ tabId = 41, requestId = "request-output-123", jobId = "123", senderUrl = "https://awx-public.ikatec.cloud/#/jobs/playbook/123/output", templateId = "59", subdomain = "qa-suporte" } = {}) {
     return new Promise((resolve) => {
-      const keepChannelOpen = listener({ type: "AWX_EXPECT_OUTPUT_DOWNLOAD", requestId, jobId }, {
+      const keepChannelOpen = listener({ type: "AWX_EXPECT_OUTPUT_DOWNLOAD", requestId, jobId, templateId, subdomain }, {
         tab: { id: tabId },
         url: senderUrl,
       }, resolve);
@@ -75,7 +77,13 @@ function loadBackground() {
     });
   }
 
-  return { requestRefresh, expectOutputDownload, storage, sessionStorage, sentToTabs, get lastInjection() { return lastInjection; }, get downloadListener() { return downloadListener; } };
+  function determineFilename(downloadItem) {
+    return new Promise((resolve) => {
+      filenameListener(downloadItem, resolve);
+    });
+  }
+
+  return { requestRefresh, expectOutputDownload, determineFilename, storage, sessionStorage, sentToTabs, get lastInjection() { return lastInjection; }, get downloadListener() { return downloadListener; } };
 }
 
 test("serializes refreshes from multiple tabs with at least 30 seconds between them", async () => {
@@ -95,6 +103,13 @@ test("captures the expected AWX TXT download and sends its contents to that job 
   const background = loadBackground();
   const registered = await background.expectOutputDownload();
   assert.equal(registered.registered, true);
+
+  const suggestion = await background.determineFilename({
+    url: "https://awx-public.ikatec.cloud/api/v2/jobs/123/stdout/?format=txt_download",
+    referrer: "https://awx-public.ikatec.cloud/#/jobs/playbook/123/output",
+  });
+  assert.equal(suggestion.filename, "awx-webhooks-qa-suporte-123.txt");
+  assert.equal(suggestion.conflictAction, "uniquify");
 
   await background.downloadListener({
     id: 81,
@@ -120,7 +135,14 @@ test("matches concurrent downloads by job ID and routes each result to its regis
     requestId: "request-output-456",
     jobId: "456",
     senderUrl: "https://awx-public.ikatec.cloud/#/jobs/playbook/456/output",
+    templateId: "88",
   });
+
+  const queueSuggestion = await background.determineFilename({
+    url: "https://awx-public.ikatec.cloud/api/v2/jobs/456/stdout/?format=txt_download",
+    referrer: "https://awx-public.ikatec.cloud/#/jobs/playbook/456/output",
+  });
+  assert.equal(queueSuggestion.filename, "awx-process-queue-qa-suporte-456.txt");
 
   await background.downloadListener({
     id: 82,
@@ -154,6 +176,18 @@ test("does not register an output capture request from outside AWX", async () =>
 
   assert.equal(registered.registered, false);
   assert.equal(background.sessionStorage.get("digisacAwxPendingOutputDownloads"), undefined);
+});
+
+test("does not rename unrelated or unregistered downloads", async () => {
+  const background = loadBackground();
+  const unrelated = await background.determineFilename({ url: "https://files.example/report.txt" });
+  assert.equal(unrelated, undefined);
+
+  const unregisteredAwx = await background.determineFilename({
+    url: "https://awx-public.ikatec.cloud/api/v2/jobs/999/stdout/?format=txt_download",
+    referrer: "https://awx-public.ikatec.cloud/#/jobs/playbook/999/output",
+  });
+  assert.equal(unregisteredAwx, undefined);
 });
 
 test("rejects a download URL for another job even if its filename matches the expected job", async () => {

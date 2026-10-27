@@ -163,6 +163,7 @@ const MIN_JOB_REFRESH_GAP_MS = 30 * 1000;
 const OUTPUT_DOWNLOAD_TTL_MS = 60 * 1000;
 const MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 const AWX_ORIGIN = "https://awx-public.ikatec.cloud";
+const AWX_OUTPUT_TEMPLATE_LABELS = { "59": "webhooks", "88": "process-queue" };
 
 let reservationQueue = Promise.resolve();
 
@@ -184,6 +185,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
 chrome.downloads.onCreated.addListener((downloadItem) => {
   return captureExpectedOutputDownload(downloadItem).catch(() => undefined);
+});
+
+chrome.downloads.onDeterminingFilename.addListener((downloadItem, suggest) => {
+  const safeDownloadUrl = getAllowedAwxDownloadUrl(downloadItem?.url, downloadItem?.referrer)
+    || getAllowedAwxDownloadUrl(downloadItem?.finalUrl, downloadItem?.referrer);
+  const jobId = safeDownloadUrl ? getDownloadedJobId(downloadItem, safeDownloadUrl) : "";
+  if (!jobId) {
+    suggest();
+    return;
+  }
+
+  getExpectedOutputFilename(jobId)
+    .then((filename) => suggest(filename ? { filename, conflictAction: "uniquify" } : undefined))
+    .catch(() => suggest());
+  return true;
 });
 
 async function reserveRefreshSlot() {
@@ -208,6 +224,10 @@ async function registerExpectedOutputDownload(message, sender) {
   if (!Number.isInteger(tabId) || senderOrigin !== AWX_ORIGIN) return { registered: false };
   if (typeof message.requestId !== "string" || message.requestId.length < 8 || message.requestId.length > 128) return { registered: false };
   if (typeof message.jobId !== "string" || !/^\d+$/.test(message.jobId)) return { registered: false };
+  const templateId = String(message.templateId || "59");
+  const subdomain = String(message.subdomain || "").trim().toLowerCase();
+  if (!Object.hasOwn(AWX_OUTPUT_TEMPLATE_LABELS, templateId)
+    || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(subdomain)) return { registered: false };
 
   const stored = await chrome.storage.session.get(PENDING_OUTPUT_DOWNLOADS_KEY);
   const pendingByRequest = stored[PENDING_OUTPUT_DOWNLOADS_KEY] || {};
@@ -219,10 +239,29 @@ async function registerExpectedOutputDownload(message, sender) {
     requestId: message.requestId,
     jobId: message.jobId,
     tabId,
+    filename: buildAwxOutputFilename(templateId, subdomain, message.jobId),
     requestedAt: now,
   };
   await chrome.storage.session.set({ [PENDING_OUTPUT_DOWNLOADS_KEY]: pendingByRequest });
   return { registered: true };
+}
+
+async function getExpectedOutputFilename(jobId) {
+  const stored = await chrome.storage.session.get(PENDING_OUTPUT_DOWNLOADS_KEY);
+  const pendingByRequest = stored[PENDING_OUTPUT_DOWNLOADS_KEY] || {};
+  const now = Date.now();
+  const matches = Object.values(pendingByRequest)
+    .filter((pending) => pending
+      && pending.jobId === jobId
+      && typeof pending.filename === "string"
+      && now - Number(pending.requestedAt) <= OUTPUT_DOWNLOAD_TTL_MS)
+    .sort((left, right) => Number(right.requestedAt) - Number(left.requestedAt));
+  return matches[0]?.filename || "";
+}
+
+function buildAwxOutputFilename(templateId, subdomain, jobId) {
+  const label = AWX_OUTPUT_TEMPLATE_LABELS[templateId];
+  return `awx-${label}-${subdomain}-${jobId}.txt`;
 }
 
 async function captureExpectedOutputDownload(downloadItem) {

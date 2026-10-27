@@ -212,8 +212,7 @@
 
       if (outputCaptureTimer) clearTimeout(outputCaptureTimer);
       chrome.runtime.onMessage.removeListener(onCapturedOutput);
-      const filenameLabel = String(pendingJob.templateId || "59") === "88" ? "process-queue" : "webhooks";
-      const filename = `awx-${filenameLabel}-${pendingJob.sourceSubdomain || "tenant"}-${pendingJob.jobId}.txt`;
+      const filename = buildOutputFilename(pendingJob);
       const output = message.ok && typeof message.output === "string" ? message.output : "";
       const error = message.error === "AWX_OUTPUT_TOO_LARGE"
         ? "O output excede o limite de 5 MB para exibição na ferramenta; o arquivo continua disponível nos downloads."
@@ -243,9 +242,13 @@
       if (finishedWatching) return;
       let pendingJob = readPendingJob();
       if (!pendingJob) {
-        finishedWatching = true;
-        routeObserver.disconnect();
-        if (routeTimer) clearInterval(routeTimer);
+        stopWatching();
+        return;
+      }
+      if (pendingJob.returnOrigin && isSourceWindowClosed()) {
+        try { sessionStorage.removeItem(JOB_MONITOR_KEY); } catch {}
+        showNotice("A página do Exportador foi fechada. O acompanhamento deste job foi encerrado.");
+        stopWatching();
         return;
       }
       const currentRouteAndQuery = location.hash.replace(/^#/, "");
@@ -356,17 +359,22 @@
         routeObserver.disconnect();
         clearInterval(routeTimer);
         savePendingJob({ ...pendingJob, downloadRequestedAt: Date.now() });
-        chrome.runtime.sendMessage({ type: "AWX_EXPECT_OUTPUT_DOWNLOAD", requestId: pendingJob.requestId, jobId }, (response) => {
+        chrome.runtime.sendMessage({
+          type: "AWX_EXPECT_OUTPUT_DOWNLOAD",
+          requestId: pendingJob.requestId,
+          jobId,
+          templateId: pendingJob.templateId || "59",
+          subdomain: pendingJob.sourceSubdomain || "",
+        }, (response) => {
           if (chrome.runtime.lastError || !response?.registered) {
             try {
               downloadButton.click();
               showNotice(`Job ${jobId} concluído. O AWX está baixando o TXT; não consegui preparar a captura para a ferramenta.`, true);
-              const filenameLabel = String(pendingJob.templateId || "59") === "88" ? "process-queue" : "webhooks";
               void sendOutputToTool(pendingJob, {
                 type: "digisac-awx-webhook-output",
                 jobId,
                 finalStatus: pendingJob.status || "successful",
-                filename: `awx-${filenameLabel}-${pendingJob.sourceSubdomain || "tenant"}-${jobId}.txt`,
+                filename: buildOutputFilename(pendingJob, jobId),
                 output: "",
                 error: "O AWX baixou o TXT, mas não consegui preparar a captura do conteúdo para a ferramenta.",
                 fileAlreadyDownloaded: true,
@@ -383,12 +391,11 @@
               const latestJob = readPendingJob();
               if (!latestJob || latestJob.requestId !== pendingJob.requestId || latestJob.downloadClickedAt) return;
               chrome.runtime.onMessage.removeListener(onCapturedOutput);
-              const filenameLabel = String(latestJob.templateId || "59") === "88" ? "process-queue" : "webhooks";
               void sendOutputToTool(latestJob, {
                 type: "digisac-awx-webhook-output",
                 jobId,
                 finalStatus: latestJob.status || "successful",
-                filename: `awx-${filenameLabel}-${latestJob.sourceSubdomain || "tenant"}-${jobId}.txt`,
+                filename: buildOutputFilename(latestJob, jobId),
                 output: "",
                 error: "O AWX baixou o TXT, mas a extensão não conseguiu capturar seu conteúdo a tempo.",
                 fileAlreadyDownloaded: true,
@@ -406,8 +413,25 @@
 
     const routeObserver = new MutationObserver(checkRoute);
     routeObserver.observe(document.body, { childList: true, subtree: true });
+    const stopWatching = () => {
+      if (finishedWatching) return;
+      finishedWatching = true;
+      routeObserver.disconnect();
+      if (routeTimer) clearInterval(routeTimer);
+      if (refreshRetryTimer) clearTimeout(refreshRetryTimer);
+      if (outputCaptureTimer) clearTimeout(outputCaptureTimer);
+      chrome.runtime.onMessage.removeListener(onCapturedOutput);
+    };
     routeTimer = setInterval(checkRoute, JOB_MONITOR_POLL_MS);
     checkRoute();
+  }
+
+  function isSourceWindowClosed() {
+    try {
+      return !window.opener || window.opener.closed === true;
+    } catch {
+      return true;
+    }
   }
 
   function findEnabledControl(expectedLabel) {
@@ -525,6 +549,11 @@
     } catch {
       return "";
     }
+  }
+
+  function buildOutputFilename(job, jobId = job?.jobId) {
+    const label = String(job?.templateId || "59") === "88" ? "process-queue" : "webhooks";
+    return `awx-${label}-${job?.sourceSubdomain || "tenant"}-${jobId || "output"}.txt`;
   }
 
   function showNotice(message, isError = false) {
